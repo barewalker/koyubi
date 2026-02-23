@@ -30,9 +30,9 @@ macro_rules! dbglog {
 
 use windows::Win32::Foundation::{HINSTANCE, LPARAM, RECT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyboardState, SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
-    KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_BACK, VK_CAPITAL, VK_CONTROL, VK_DELETE, VK_END, VK_MENU,
-    VK_SHIFT, VK_SPACE,
+    GetAsyncKeyState, GetKeyboardState, SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT,
+    KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_BACK, VK_CAPITAL, VK_CONTROL, VK_DELETE,
+    VK_END, VK_MENU, VK_SHIFT, VK_SPACE,
 };
 use windows::Win32::UI::WindowsAndMessaging::GetMessageExtraInfo;
 use windows::Win32::UI::TextServices::{
@@ -453,16 +453,19 @@ fn ki(vk: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS) -> INPUT {
 /// 単一キーの SendInput シミュレーション
 ///
 /// Ctrl が物理的に押されたままだとアプリが Ctrl+キー と解釈するため、
-/// Ctrl を一時的に離してからキーを送信し、再度 Ctrl を押す。
+/// Ctrl を一時的に離してからキーを送信する。
+/// Ctrl がまだ物理的に押されている場合のみ再度押す（stuck 防止）。
 fn send_simulated_key(vk: VIRTUAL_KEY) {
+    let ctrl_held = unsafe { GetAsyncKeyState(VK_CONTROL.0 as i32) } as u16 & 0x8000 != 0;
     let inputs = [
-        ki(VK_CONTROL, KEYEVENTF_KEYUP),     // Ctrl を離す
-        ki(vk, KEYBD_EVENT_FLAGS(0)),          // キー押下
-        ki(vk, KEYEVENTF_KEYUP),              // キー離す
-        ki(VK_CONTROL, KEYBD_EVENT_FLAGS(0)), // Ctrl を再度押す
+        ki(VK_CONTROL, KEYEVENTF_KEYUP),      // Ctrl を離す
+        ki_tagged(vk, KEYBD_EVENT_FLAGS(0)),   // キー押下（タグ付き: IME 再処理防止）
+        ki_tagged(vk, KEYEVENTF_KEYUP),        // キー離す
+        ki(VK_CONTROL, KEYBD_EVENT_FLAGS(0)),  // Ctrl を再度押す
     ];
+    let count = if ctrl_held { 4 } else { 3 };
     unsafe {
-        SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+        SendInput(&inputs[..count], std::mem::size_of::<INPUT>() as i32);
     }
 }
 
@@ -470,19 +473,22 @@ fn send_simulated_key(vk: VIRTUAL_KEY) {
 ///
 /// Ctrl を離す前に Shift を押し始めることで、Ctrl→無修飾→Shift の遷移を避ける。
 /// （Windows が Ctrl UP + Shift DOWN を IME 切り替えシーケンスと誤認するのを防止）
+/// Ctrl がまだ物理的に押されている場合のみ再度押す（stuck 防止）。
 fn send_kill_line() {
+    let ctrl_held = unsafe { GetAsyncKeyState(VK_CONTROL.0 as i32) } as u16 & 0x8000 != 0;
     let inputs = [
-        ki(VK_SHIFT, KEYBD_EVENT_FLAGS(0)),   // Shift 押す（Ctrl+Shift 状態）
-        ki(VK_CONTROL, KEYEVENTF_KEYUP),     // Ctrl を離す（Shift のみ）
-        ki(VK_END, KEYBD_EVENT_FLAGS(0)),     // End 押す（Shift+End = 行末まで選択）
-        ki(VK_END, KEYEVENTF_KEYUP),         // End 離す
-        ki(VK_SHIFT, KEYEVENTF_KEYUP),       // Shift 離す
-        ki(VK_DELETE, KEYBD_EVENT_FLAGS(0)),  // Delete 押す
-        ki(VK_DELETE, KEYEVENTF_KEYUP),      // Delete 離す
-        ki(VK_CONTROL, KEYBD_EVENT_FLAGS(0)), // Ctrl を再度押す
+        ki(VK_SHIFT, KEYBD_EVENT_FLAGS(0)),          // Shift 押す（Ctrl+Shift 状態）
+        ki(VK_CONTROL, KEYEVENTF_KEYUP),             // Ctrl を離す（Shift のみ）
+        ki_tagged(VK_END, KEYBD_EVENT_FLAGS(0)),     // End 押す（Shift+End = 行末まで選択）
+        ki_tagged(VK_END, KEYEVENTF_KEYUP),          // End 離す
+        ki(VK_SHIFT, KEYEVENTF_KEYUP),               // Shift 離す
+        ki_tagged(VK_DELETE, KEYBD_EVENT_FLAGS(0)),  // Delete 押す
+        ki_tagged(VK_DELETE, KEYEVENTF_KEYUP),       // Delete 離す
+        ki(VK_CONTROL, KEYBD_EVENT_FLAGS(0)),         // Ctrl を再度押す
     ];
+    let count = if ctrl_held { 8 } else { 7 };
     unsafe {
-        SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+        SendInput(&inputs[..count], std::mem::size_of::<INPUT>() as i32);
     }
 }
 
