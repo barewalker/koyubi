@@ -31,8 +31,8 @@ macro_rules! dbglog {
 use windows::Win32::Foundation::{HINSTANCE, LPARAM, RECT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyboardState, SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
-    KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_DELETE, VK_END, VK_MENU, VK_SHIFT,
-    VK_SPACE,
+    KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_BACK, VK_CAPITAL, VK_CONTROL, VK_DELETE, VK_END, VK_MENU,
+    VK_SHIFT, VK_SPACE,
 };
 use windows::Win32::UI::WindowsAndMessaging::GetMessageExtraInfo;
 use windows::Win32::UI::TextServices::{
@@ -76,6 +76,8 @@ pub struct TextService {
     candidate_window: RefCell<CandidateWindow>,
     lang_bar_button: RefCell<Option<ITfLangBarItemButton>>,
     sands_state: Cell<SandsState>,
+    thumb_shift_held: Cell<bool>,
+    caps_ctrl_held: Cell<bool>,
 }
 
 impl TextService {
@@ -89,6 +91,8 @@ impl TextService {
             candidate_window: RefCell::new(CandidateWindow::new()),
             lang_bar_button: RefCell::new(None),
             sands_state: Cell::new(SandsState::Idle),
+            thumb_shift_held: Cell::new(false),
+            caps_ctrl_held: Cell::new(false),
         }
     }
 
@@ -523,6 +527,57 @@ fn send_space() {
     }
 }
 
+/// 単純なキー押下/離し（Ctrl 操作なし）
+///
+/// CapsLock→Ctrl の Emacs バインディング用。物理 Ctrl が押されていないため、
+/// Ctrl のリリース/再押下は不要。
+fn send_key_only(vk: VIRTUAL_KEY) {
+    let inputs = [
+        ki(vk, KEYBD_EVENT_FLAGS(0)),  // キー押下
+        ki(vk, KEYEVENTF_KEYUP),       // キー離す
+    ];
+    unsafe {
+        SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+    }
+}
+
+/// 行末まで削除（Ctrl 操作なし、CapsLock→Ctrl 用）
+///
+/// 物理 Ctrl が押されていないので、Ctrl のリリース/再押下は不要。
+fn send_kill_line_no_ctrl() {
+    let inputs = [
+        ki(VK_SHIFT, KEYBD_EVENT_FLAGS(0)),  // Shift 押す
+        ki(VK_END, KEYBD_EVENT_FLAGS(0)),     // End 押す（Shift+End = 行末まで選択）
+        ki(VK_END, KEYEVENTF_KEYUP),         // End 離す
+        ki(VK_SHIFT, KEYEVENTF_KEYUP),       // Shift 離す
+        ki(VK_DELETE, KEYBD_EVENT_FLAGS(0)),  // Delete 押す
+        ki(VK_DELETE, KEYEVENTF_KEYUP),      // Delete 離す
+    ];
+    unsafe {
+        SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+    }
+}
+
+/// Ctrl+key を SendInput で注入する（CapsLock→Ctrl の非 IME コンボ用）
+///
+/// 物理 Ctrl が押されていないので、Ctrl を押してキーを送信し、Ctrl を離す。
+fn send_ctrl_key(vk: VIRTUAL_KEY) {
+    let inputs = [
+        ki(VK_CONTROL, KEYBD_EVENT_FLAGS(0)), // Ctrl 押す
+        ki(vk, KEYBD_EVENT_FLAGS(0)),          // キー押下
+        ki(vk, KEYEVENTF_KEYUP),              // キー離す
+        ki(VK_CONTROL, KEYEVENTF_KEYUP),      // Ctrl 離す
+    ];
+    unsafe {
+        SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+    }
+}
+
+/// Thumb Shift 対象キー判定（無変換/変換/カナ）
+fn is_thumb_shift_key(vk: u16) -> bool {
+    vk == 0x1D || vk == 0x1C || vk == 0x15
+}
+
 // =========================================================
 // ITfTextInputProcessor
 // =========================================================
@@ -615,6 +670,8 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
         // エンジン状態リセット
         self.engine.borrow_mut().reset_state();
         self.sands_state.set(SandsState::Idle);
+        self.thumb_shift_held.set(false);
+        self.caps_ctrl_held.set(false);
 
         *self.thread_mgr.borrow_mut() = None;
         self.client_id.set(0);
@@ -640,10 +697,60 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
         let vk = wparam.0 as u16;
         let sands_enabled = self.engine.borrow().config().sands_enabled;
 
-        // SandS が注入したキーはスルー
-        if sands_enabled && unsafe { GetMessageExtraInfo() }.0 as usize == SANDS_INJECTED {
+        // SendInput で注入したキーはスルー（SandS / CapsLock→Ctrl 共通）
+        if unsafe { GetMessageExtraInfo() }.0 as usize == SANDS_INJECTED {
             dbglog!("OnTestKeyDown: vk=0x{:02X} SANDS_INJECTED -> pass", vk);
             return Ok(BOOL(0));
+        }
+
+        // CapsLock→Ctrl: VK_CAPITAL 自体を消費
+        let caps_ctrl_enabled = self.engine.borrow().config().caps_ctrl_enabled;
+        if caps_ctrl_enabled && vk == VK_CAPITAL.0 {
+            dbglog!("OnTestKeyDown: CapsLock -> eat");
+            return Ok(BOOL(1));
+        }
+
+        // CapsLock→Ctrl が押されているとき、非修飾キーを消費
+        if caps_ctrl_enabled && self.caps_ctrl_held.get() {
+            if vk != VK_SHIFT.0 && vk != VK_CONTROL.0 && vk != VK_MENU.0 {
+                let mut kbd_state = [0u8; 256];
+                unsafe {
+                    if GetKeyboardState(&mut kbd_state).is_err() {
+                        kbd_state.fill(0);
+                    }
+                }
+                let ctrl = kbd_state[VK_CONTROL.0 as usize] & 0x80 != 0;
+                let alt = kbd_state[VK_MENU.0 as usize] & 0x80 != 0;
+                if !ctrl && !alt {
+                    dbglog!("OnTestKeyDown: vk=0x{:02X} caps_ctrl -> eat", vk);
+                    return Ok(BOOL(1));
+                }
+            }
+        }
+
+        // Thumb Shift: 無変換/変換/カナキー自体を消費
+        let thumb_shift_enabled = self.engine.borrow().config().thumb_shift_enabled;
+        if thumb_shift_enabled && is_thumb_shift_key(vk) {
+            dbglog!("OnTestKeyDown: thumb shift key 0x{:02X} -> eat", vk);
+            return Ok(BOOL(1));
+        }
+
+        // Thumb Shift が押されているとき、非修飾キーを消費
+        if thumb_shift_enabled && self.thumb_shift_held.get() {
+            if vk != VK_SHIFT.0 && vk != VK_CONTROL.0 && vk != VK_MENU.0 {
+                let mut kbd_state = [0u8; 256];
+                unsafe {
+                    if GetKeyboardState(&mut kbd_state).is_err() {
+                        kbd_state.fill(0);
+                    }
+                }
+                let ctrl = kbd_state[VK_CONTROL.0 as usize] & 0x80 != 0;
+                let alt = kbd_state[VK_MENU.0 as usize] & 0x80 != 0;
+                if !ctrl && !alt {
+                    dbglog!("OnTestKeyDown: vk=0x{:02X} thumb_shift -> eat", vk);
+                    return Ok(BOOL(1));
+                }
+            }
         }
 
         // Space キー（Ctrl なし）→ SandS で消費
@@ -697,6 +804,18 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
     ) -> windows::core::Result<BOOL> {
         let vk = wparam.0 as u16;
 
+        // CapsLock up → 消費
+        if self.engine.borrow().config().caps_ctrl_enabled && vk == VK_CAPITAL.0 {
+            dbglog!("OnTestKeyUp: CapsLock -> eat");
+            return Ok(BOOL(1));
+        }
+
+        // Thumb Shift キー up → 消費
+        if self.engine.borrow().config().thumb_shift_enabled && is_thumb_shift_key(vk) {
+            dbglog!("OnTestKeyUp: thumb shift key 0x{:02X} -> eat", vk);
+            return Ok(BOOL(1));
+        }
+
         // Space up + SandS 状態 → 消費
         if self.engine.borrow().config().sands_enabled && vk == VK_SPACE.0 {
             let sands = self.sands_state.get();
@@ -719,10 +838,136 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
         let vk = wparam.0 as u16;
         let sands_enabled = self.engine.borrow().config().sands_enabled;
 
-        // SandS が注入したキーはスルー
-        if sands_enabled && unsafe { GetMessageExtraInfo() }.0 as usize == SANDS_INJECTED {
+        // SendInput で注入したキーはスルー（SandS / CapsLock→Ctrl 共通）
+        if unsafe { GetMessageExtraInfo() }.0 as usize == SANDS_INJECTED {
             dbglog!("OnKeyDown: vk=0x{:02X} SANDS_INJECTED -> pass", vk);
             return Ok(BOOL(0));
+        }
+
+        // CapsLock→Ctrl: VK_CAPITAL → caps_ctrl_held = true
+        let caps_ctrl_enabled = self.engine.borrow().config().caps_ctrl_enabled;
+        if caps_ctrl_enabled && vk == VK_CAPITAL.0 {
+            self.caps_ctrl_held.set(true);
+            dbglog!("OnKeyDown: CapsLock -> caps_ctrl_held=true");
+            return Ok(BOOL(1));
+        }
+
+        // CapsLock→Ctrl が押されているとき、Ctrl 付きで処理
+        if caps_ctrl_enabled && self.caps_ctrl_held.get() {
+            if vk != VK_SHIFT.0 && vk != VK_CONTROL.0 && vk != VK_MENU.0 {
+                let mut kbd_state = [0u8; 256];
+                unsafe {
+                    if GetKeyboardState(&mut kbd_state).is_err() {
+                        kbd_state.fill(0);
+                    }
+                }
+                let physical_ctrl = kbd_state[VK_CONTROL.0 as usize] & 0x80 != 0;
+                let alt = kbd_state[VK_MENU.0 as usize] & 0x80 != 0;
+                if !physical_ctrl && !alt {
+                    dbglog!("OnKeyDown: vk=0x{:02X} caps_ctrl -> ctrl", vk);
+
+                    // Emacs バインディング処理（Ctrl+H 以外）
+                    if self.engine.borrow().config().emacs_bindings_enabled {
+                        let shift = kbd_state[VK_SHIFT.0 as usize] & 0x80 != 0;
+                        if !shift {
+                            match key_event::emacs_action(vk) {
+                                Some(EmacsAction::SimulateKey(target)) => {
+                                    dbglog!("OnKeyDown: caps_ctrl Emacs SimulateKey -> 0x{:04X}", target.0);
+                                    send_key_only(target);
+                                    return Ok(BOOL(1));
+                                }
+                                Some(EmacsAction::KillLine) => {
+                                    dbglog!("OnKeyDown: caps_ctrl Emacs KillLine");
+                                    send_kill_line_no_ctrl();
+                                    return Ok(BOOL(1));
+                                }
+                                None => {}
+                            }
+                        }
+                    }
+
+                    // エンジンに Ctrl 強制で渡す
+                    let key_event = match key_event::to_key_event_with_forced_ctrl(wparam, lparam) {
+                        Some(ev) => {
+                            dbglog!("OnKeyDown: caps_ctrl forced ctrl -> {:?}", ev);
+                            ev
+                        }
+                        None => {
+                            dbglog!("OnKeyDown: caps_ctrl forced ctrl -> None (ignored)");
+                            return Ok(BOOL(0));
+                        }
+                    };
+
+                    let response = self.engine.borrow_mut().process_key(key_event);
+                    dbglog!("OnKeyDown: caps_ctrl response={:?}", response);
+
+                    // PassThrough の特殊処理
+                    if let EngineResponse::PassThrough = &response {
+                        // Ctrl+H → Backspace
+                        if vk == 0x48 {
+                            dbglog!("OnKeyDown: caps_ctrl Ctrl+H PassThrough -> send_key_only(VK_BACK)");
+                            send_key_only(VK_BACK);
+                            return Ok(BOOL(1));
+                        }
+                        // その他 → Ctrl+key をアプリに届ける（Ctrl+C/V/Z 等）
+                        dbglog!("OnKeyDown: caps_ctrl PassThrough -> send_ctrl_key(0x{:02X})", vk);
+                        send_ctrl_key(VIRTUAL_KEY(vk));
+                        return Ok(BOOL(1));
+                    }
+
+                    let sink: ITfCompositionSink = self.to_interface();
+                    return self.handle_engine_response(&context, response, vk, sink);
+                }
+            }
+        }
+
+        // Thumb Shift: キー自体 → thumb_shift_held = true
+        let thumb_shift_enabled = self.engine.borrow().config().thumb_shift_enabled;
+        if thumb_shift_enabled && is_thumb_shift_key(vk) {
+            self.thumb_shift_held.set(true);
+            dbglog!("OnKeyDown: thumb shift key 0x{:02X} -> held=true", vk);
+            return Ok(BOOL(1));
+        }
+
+        // Thumb Shift が押されているとき、非修飾キーを Shift 付きで処理
+        if thumb_shift_enabled && self.thumb_shift_held.get() {
+            if vk != VK_SHIFT.0 && vk != VK_CONTROL.0 && vk != VK_MENU.0 {
+                let mut kbd_state = [0u8; 256];
+                unsafe {
+                    if GetKeyboardState(&mut kbd_state).is_err() {
+                        kbd_state.fill(0);
+                    }
+                }
+                let ctrl = kbd_state[VK_CONTROL.0 as usize] & 0x80 != 0;
+                let alt = kbd_state[VK_MENU.0 as usize] & 0x80 != 0;
+                if !ctrl && !alt {
+                    dbglog!("OnKeyDown: vk=0x{:02X} thumb_shift -> shift", vk);
+
+                    // Ascii モード → SendInput で Shift+key を注入
+                    if self.engine.borrow().current_mode() == InputMode::Ascii {
+                        dbglog!("OnKeyDown: thumb_shift Ascii -> send_shifted_key(0x{:02X})", vk);
+                        send_shifted_key(VIRTUAL_KEY(vk));
+                        return Ok(BOOL(1));
+                    }
+
+                    // 非 Ascii → Shift 強制でエンジンに渡す
+                    let key_event = match key_event::to_key_event_with_forced_shift(wparam, lparam) {
+                        Some(ev) => {
+                            dbglog!("OnKeyDown: thumb_shift forced shift -> {:?}", ev);
+                            ev
+                        }
+                        None => {
+                            dbglog!("OnKeyDown: thumb_shift forced shift -> None (ignored)");
+                            return Ok(BOOL(0));
+                        }
+                    };
+
+                    let response = self.engine.borrow_mut().process_key(key_event);
+                    dbglog!("OnKeyDown: thumb_shift response={:?}", response);
+                    let sink: ITfCompositionSink = self.to_interface();
+                    return self.handle_engine_response(&context, response, vk, sink);
+                }
+            }
         }
 
         // Space キー（Ctrl なし）→ SandS 状態遷移
@@ -803,6 +1048,20 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
     ) -> windows::core::Result<BOOL> {
         let vk = wparam.0 as u16;
 
+        // CapsLock up → caps_ctrl_held=false
+        if self.engine.borrow().config().caps_ctrl_enabled && vk == VK_CAPITAL.0 {
+            self.caps_ctrl_held.set(false);
+            dbglog!("OnKeyUp: CapsLock -> caps_ctrl_held=false");
+            return Ok(BOOL(1));
+        }
+
+        // Thumb Shift キー up → held=false
+        if self.engine.borrow().config().thumb_shift_enabled && is_thumb_shift_key(vk) {
+            self.thumb_shift_held.set(false);
+            dbglog!("OnKeyUp: thumb shift key 0x{:02X} -> held=false", vk);
+            return Ok(BOOL(1));
+        }
+
         if self.engine.borrow().config().sands_enabled && vk == VK_SPACE.0 {
             let sands = self.sands_state.get();
             match sands {
@@ -867,6 +1126,8 @@ impl ITfCompositionSink_Impl for TextService_Impl {
         // エンジン状態をリセットし、コンポジション参照をクリア
         self.engine.borrow_mut().reset_state();
         self.sands_state.set(SandsState::Idle);
+        self.thumb_shift_held.set(false);
+        self.caps_ctrl_held.set(false);
         *self.composition.borrow_mut() = None;
         self.candidate_window.borrow().hide();
         Ok(())

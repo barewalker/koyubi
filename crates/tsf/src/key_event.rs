@@ -208,6 +208,74 @@ pub fn to_key_event_with_forced_shift(wparam: WPARAM, lparam: LPARAM) -> Option<
     })
 }
 
+/// CapsLock→Ctrl 用: Ctrl を強制した状態で KeyEvent に変換する。
+///
+/// kbd_state の Ctrl は非押下のまま。shift/alt は物理状態を反映。
+/// Ctrl+H → Key::Backspace (ctrl=false) 変換も含む。
+pub fn to_key_event_with_forced_ctrl(wparam: WPARAM, lparam: LPARAM) -> Option<KeyEvent> {
+    let vk = wparam.0 as u16;
+
+    // 修飾キー単体は無視
+    if vk == VK_SHIFT.0 || vk == VK_CONTROL.0 || vk == VK_MENU.0 {
+        return None;
+    }
+
+    let mut kbd_state = [0u8; 256];
+    unsafe {
+        if GetKeyboardState(&mut kbd_state).is_err() {
+            kbd_state.fill(0);
+        }
+    }
+
+    let shift = is_key_down(&kbd_state, VK_SHIFT);
+    let alt = is_key_down(&kbd_state, VK_MENU);
+
+    // Ctrl+H → Backspace に変換（ctrl フラグは落とす）
+    if vk == 0x48 {
+        return Some(KeyEvent {
+            key: Key::Backspace,
+            shift,
+            ctrl: false,
+            alt,
+        });
+    }
+
+    // 非文字キーの直接マッピング
+    let key = match vk {
+        v if v == VK_RETURN.0 => Key::Enter,
+        v if v == VK_SPACE.0 => Key::Space,
+        v if v == VK_BACK.0 => Key::Backspace,
+        v if v == VK_ESCAPE.0 => Key::Escape,
+        v if v == VK_TAB.0 => Key::Tab,
+        _ => {
+            // 文字キー: ToUnicode で文字を取得
+            // 物理 Ctrl は押されていないので kbd_state のクリアは不要
+            let sc = scan_code(lparam);
+            let mut buf = [0u16; 4];
+            let result = unsafe {
+                ToUnicode(vk as u32, sc, Some(&kbd_state), &mut buf, 0)
+            };
+
+            if result == 1 {
+                if let Some(ch) = char::from_u32(buf[0] as u32) {
+                    Key::Char(ch)
+                } else {
+                    return None;
+                }
+            } else {
+                return None;
+            }
+        }
+    };
+
+    Some(KeyEvent {
+        key,
+        shift,
+        ctrl: true,
+        alt,
+    })
+}
+
 /// キーを消費するかどうかの事前判定（OnTestKeyDown 用）。
 ///
 /// エンジンの process_key() を呼ばずに、キーを食べるか判定する。

@@ -4,7 +4,7 @@
 #define MyAppName "Koyubi SKK"
 #define MyAppVersion "0.1.0"
 #define MyAppPublisher "Koyubi Project"
-#define MyAppURL "https://github.com/mitch/koyubi"
+#define MyAppURL "https://github.com/m-takeuchi/koyubi"
 
 ; AppId matches CLSID_KOYUBI_TEXT_SERVICE in globals.rs
 #define MyAppId "{{A7B3C4D5-E6F7-4890-AB12-CD34EF567890}"
@@ -35,7 +35,7 @@ Name: "japanese"; MessagesFile: "compiler:Languages\Japanese.isl"
 [Files]
 ; TSF COM DLL - regserver flag handles DllRegisterServer/DllUnregisterServer
 Source: "..\target\x86_64-pc-windows-msvc\release\koyubi_tsf.dll"; \
-    DestDir: "{app}"; Flags: regserver 64bit
+    DestDir: "{app}"; Flags: regserver restartreplace uninsrestartdelete 64bit
 ; Dictionary download tool
 Source: "..\target\x86_64-pc-windows-msvc\release\koyubi-dict.exe"; \
     DestDir: "{app}"; Flags: 64bit
@@ -61,7 +61,7 @@ begin
     'Select SKK dictionaries to download.',
     'The following dictionaries are available. ' +
     'SKK-JISYO.L (large dictionary) is recommended for most users.',
-    True, False);
+    False, False);
   DictPage.Add('SKK-JISYO.L - Large dictionary (~4.3 MB) [recommended]');
   DictPage.Add('SKK-JISYO.jinmei - Personal names (~0.8 MB)');
   DictPage.Add('SKK-JISYO.geo - Place names (~0.4 MB)');

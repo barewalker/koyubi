@@ -17,6 +17,10 @@ pub struct Config {
     pub sands_enabled: bool,
     /// Emacs キーバインド (Ctrl+F/B/A/E/N/P/D/K) の有効/無効
     pub emacs_bindings_enabled: bool,
+    /// Thumb Shift（無変換/変換/カナキーを Shift として使用）の有効/無効
+    pub thumb_shift_enabled: bool,
+    /// CapsLock → Ctrl リマッピングの有効/無効
+    pub caps_ctrl_enabled: bool,
     /// システム辞書パス（空の場合は自動検出）
     pub system_dict_paths: Vec<String>,
     /// ユーザー辞書パス（None の場合は %APPDATA%\Koyubi\dict\user-dict.skk）
@@ -38,6 +42,8 @@ impl Default for Config {
         Self {
             sands_enabled: true,
             emacs_bindings_enabled: true,
+            thumb_shift_enabled: false,
+            caps_ctrl_enabled: false,
             system_dict_paths: Vec::new(),
             user_dict_path: None,
             toggle_kana: 'q',
@@ -78,6 +84,8 @@ mod tests {
         let config = Config::default();
         assert!(config.sands_enabled);
         assert!(config.emacs_bindings_enabled);
+        assert!(!config.thumb_shift_enabled);
+        assert!(!config.caps_ctrl_enabled);
         assert!(config.system_dict_paths.is_empty());
         assert!(config.user_dict_path.is_none());
         assert_eq!(config.toggle_kana, 'q');
@@ -91,6 +99,7 @@ mod tests {
     fn empty_string_returns_default() {
         let config = Config::from_str("");
         assert!(config.sands_enabled);
+        assert!(!config.thumb_shift_enabled);
         assert_eq!(config.toggle_kana, 'q');
         assert_eq!(config.initial_mode, InputMode::Ascii);
     }
@@ -109,6 +118,8 @@ mod tests {
         let toml = r#"
 sands_enabled = false
 emacs_bindings_enabled = false
+thumb_shift_enabled = true
+caps_ctrl_enabled = true
 system_dict_paths = ["/path/to/SKK-JISYO.L", "/path/to/SKK-JISYO.M"]
 user_dict_path = "/path/to/user-dict.skk"
 toggle_kana = "z"
@@ -120,6 +131,8 @@ initial_mode = "hiragana"
         let config = Config::from_str(toml);
         assert!(!config.sands_enabled);
         assert!(!config.emacs_bindings_enabled);
+        assert!(config.thumb_shift_enabled);
+        assert!(config.caps_ctrl_enabled);
         assert_eq!(config.system_dict_paths, vec![
             "/path/to/SKK-JISYO.L",
             "/path/to/SKK-JISYO.M",
