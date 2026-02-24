@@ -197,13 +197,13 @@ impl TextService {
         &self,
         context: &ITfContext,
         response: EngineResponse,
-        vk: u16,
+        is_ctrl_h: bool,
         comp_sink: ITfCompositionSink,
     ) -> windows::core::Result<BOOL> {
         match response {
             EngineResponse::PassThrough => {
                 // Ctrl+H: エンジンが PassThrough を返した場合、VK_BACK をシミュレート
-                if vk == 0x48 {
+                if is_ctrl_h {
                     dbglog!("handle_engine_response: Ctrl+H PassThrough -> simulate VK_BACK");
                     send_simulated_key(VK_BACK);
                     return Ok(BOOL(1));
@@ -285,10 +285,14 @@ impl TextService {
             }
         };
 
+        // Ctrl+H は to_key_event で Key::Backspace に変換される。
+        // PassThrough 時に VK_BACK をシミュレートする必要があるため検出する。
+        let is_ctrl_h = vk == 0x48 && matches!(key_event.key, koyubi_engine::Key::Backspace);
+
         let response = self.engine.borrow_mut().process_key(key_event);
         dbglog!("process_key_normal: response={:?}", response);
 
-        self.handle_engine_response(context, response, vk, comp_sink)
+        self.handle_engine_response(context, response, is_ctrl_h, comp_sink)
     }
 
     /// 言語バーボタンにモード変更を通知する
@@ -922,7 +926,7 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
                     }
 
                     let sink: ITfCompositionSink = self.to_interface();
-                    return self.handle_engine_response(&context, response, vk, sink);
+                    return self.handle_engine_response(&context, response, false, sink);
                 }
             }
         }
@@ -971,7 +975,7 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
                     let response = self.engine.borrow_mut().process_key(key_event);
                     dbglog!("OnKeyDown: thumb_shift response={:?}", response);
                     let sink: ITfCompositionSink = self.to_interface();
-                    return self.handle_engine_response(&context, response, vk, sink);
+                    return self.handle_engine_response(&context, response, false, sink);
                 }
             }
         }
@@ -1036,7 +1040,7 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
                     let response = self.engine.borrow_mut().process_key(key_event);
                     dbglog!("OnKeyDown: SandS response={:?}", response);
                     let sink: ITfCompositionSink = self.to_interface();
-                    return self.handle_engine_response(&context, response, vk, sink);
+                    return self.handle_engine_response(&context, response, false, sink);
                 }
             }
         }
@@ -1094,7 +1098,7 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
                     let response = self.engine.borrow_mut().process_key(key_event);
                     dbglog!("OnKeyUp: Space tap response={:?}", response);
                     let sink: ITfCompositionSink = self.to_interface();
-                    return self.handle_engine_response(&context, response, VK_SPACE.0, sink);
+                    return self.handle_engine_response(&context, response, false, sink);
                 }
                 SandsState::ShiftActive => {
                     // Space+他キーが発生した後の Space up → 抑制
