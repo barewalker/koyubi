@@ -2,7 +2,7 @@
 ; Requires Inno Setup 6.0+
 
 #define MyAppName "Koyubi SKK"
-#define MyAppVersion "0.1.1"
+#define MyAppVersion "0.1.2"
 #define MyAppPublisher "Koyubi Project"
 #define MyAppURL "https://github.com/barewalker/koyubi"
 
